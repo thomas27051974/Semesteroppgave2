@@ -1,0 +1,326 @@
+// Norwegian ATS — Prisma schema
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  RECRUITER
+  CANDIDATE
+  ADMIN
+}
+
+enum JobStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+}
+
+enum StageType {
+  APPLIED
+  SCREENING
+  INTERVIEW
+  OFFER
+  HIRED
+  REJECTED
+}
+
+enum AutomationEvent {
+  ON_ENTER
+  ON_EXIT
+}
+
+enum AutomationAction {
+  SEND_EMAIL
+  NOTIFY_USER
+  CREATE_TASK
+  ADD_TAG
+}
+
+enum MessageChannel {
+  CHAT
+  EMAIL
+}
+
+enum MessageDirection {
+  IN
+  OUT
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+model User {
+  id               String         @id @default(cuid())
+  email            String         @unique
+  passwordHash     String
+  name             String
+  role             Role           @default(CANDIDATE)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  candidate        Candidate?
+  movedTransitions StageTransition[] @relation("MovedByUser")
+  authoredMessages Message[]      @relation("MessageAuthor")
+  tasks            Task[]         @relation("TaskAssignee")
+  notifications    Notification[]
+  interviewScores  InterviewScore[] @relation("Interviewer")
+}
+
+model Candidate {
+  id             String        @id @default(cuid())
+  userId         String        @unique
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phone          String?
+  address        String?
+  linkedinUrl    String?
+  tags           String[]      @default([])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  resumes        Resume[]
+  applications   Application[]
+}
+
+model Resume {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  filename    String
+  blobUrl     String
+  sizeBytes   Int
+  isPrimary   Boolean   @default(false)
+  uploadedAt  DateTime  @default(now())
+}
+
+model Pipeline {
+  id          String       @id @default(cuid())
+  name        String
+  isTemplate  Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  stages      Stage[]
+  jobs        Job[]
+  automations Automation[]
+}
+
+model Stage {
+  id          String        @id @default(cuid())
+  pipelineId  String
+  pipeline    Pipeline      @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  name        String
+  order       Int
+  type        StageType
+  slaDays     Int?
+  applications Application[]
+  fromTransitions StageTransition[] @relation("FromStage")
+  toTransitions   StageTransition[] @relation("ToStage")
+  automations Automation[]
+
+  @@unique([pipelineId, order])
+}
+
+model Job {
+  id              String        @id @default(cuid())
+  title           String
+  slug            String        @unique
+  description     String        @db.Text
+  location        String
+  employmentType  String        @default("Fast")
+  department      String?
+  status          JobStatus     @default(DRAFT)
+  pipelineId      String
+  pipeline        Pipeline      @relation(fields: [pipelineId], references: [id])
+  publishedAt     DateTime?
+  closedAt        DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  applications    Application[]
+  interviewSets   InterviewSet[]
+}
+
+model Application {
+  id             String          @id @default(cuid())
+  candidateId    String
+  candidate      Candidate       @relation(fields: [candidateId], references: [id])
+  jobId          String
+  job            Job             @relation(fields: [jobId], references: [id])
+  currentStageId String
+  currentStage   Stage           @relation(fields: [currentStageId], references: [id])
+  appliedAt      DateTime        @default(now())
+  source         String          @default("jobbside")
+  coverLetter    String?         @db.Text
+  answers        Json?
+  resumeUrl      String?
+  transitions    StageTransition[]
+  threads        MessageThread[]
+  tasks          Task[]
+  scores         InterviewScore[]
+  updatedAt      DateTime        @updatedAt
+
+  @@unique([candidateId, jobId])
+  @@index([jobId, currentStageId])
+}
+
+model StageTransition {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  fromStageId   String?
+  fromStage     Stage?      @relation("FromStage", fields: [fromStageId], references: [id])
+  toStageId     String
+  toStage       Stage       @relation("ToStage", fields: [toStageId], references: [id])
+  movedByUserId String?
+  movedByUser   User?       @relation("MovedByUser", fields: [movedByUserId], references: [id])
+  movedAt       DateTime    @default(now())
+  reason        String?
+  automationRuns AutomationRun[]
+
+  @@index([applicationId, movedAt])
+}
+
+model Automation {
+  id          String           @id @default(cuid())
+  pipelineId  String
+  pipeline    Pipeline         @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  stageId     String
+  stage       Stage            @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  event       AutomationEvent
+  actionType  AutomationAction
+  // config shape per actionType:
+  //   SEND_EMAIL  : { templateId: string }
+  //   NOTIFY_USER : { userId: string, message: string }
+  //   CREATE_TASK : { assigneeUserId: string, title: string, dueInDays: number }
+  //   ADD_TAG     : { tag: string }
+  config      Json
+  enabled     Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  runs        AutomationRun[]
+}
+
+model AutomationRun {
+  id           String          @id @default(cuid())
+  automationId String
+  automation   Automation      @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  transitionId String
+  transition   StageTransition @relation(fields: [transitionId], references: [id], onDelete: Cascade)
+  ranAt        DateTime        @default(now())
+  success      Boolean         @default(true)
+  errorMessage String?
+
+  @@unique([automationId, transitionId])
+}
+
+model EmailTemplate {
+  id           String   @id @default(cuid())
+  name         String
+  subject      String
+  bodyMarkdown String   @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model InterviewSet {
+  id          String              @id @default(cuid())
+  name        String
+  description String?             @db.Text
+  jobId       String?
+  job         Job?                @relation(fields: [jobId], references: [id])
+  questions   InterviewQuestion[]
+  scores      InterviewScore[]
+  createdAt   DateTime            @default(now())
+}
+
+model InterviewQuestion {
+  id             String       @id @default(cuid())
+  interviewSetId String
+  interviewSet   InterviewSet @relation(fields: [interviewSetId], references: [id], onDelete: Cascade)
+  text           String       @db.Text
+  weight         Int          @default(1)
+  order          Int
+}
+
+model InterviewScore {
+  id             String       @id @default(cuid())
+  applicationId  String
+  application    Application  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  interviewSetId String
+  interviewSet   InterviewSet @relation(fields: [interviewSetId], references: [id])
+  interviewerId  String
+  interviewer    User         @relation("Interviewer", fields: [interviewerId], references: [id])
+  // answers: { [questionId]: { score: number(1-5), note: string } }
+  answers        Json
+  overallScore   Float
+  submittedAt    DateTime     @default(now())
+}
+
+model MessageThread {
+  id            String         @id @default(cuid())
+  applicationId String
+  application   Application    @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  channel       MessageChannel
+  subject       String?
+  createdAt     DateTime       @default(now())
+  messages      Message[]
+
+  @@unique([applicationId, channel])
+}
+
+model Message {
+  id            String           @id @default(cuid())
+  threadId      String
+  thread        MessageThread    @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  authorUserId  String?
+  author        User?            @relation("MessageAuthor", fields: [authorUserId], references: [id])
+  direction     MessageDirection
+  body          String           @db.Text
+  externalId    String?
+  sentAt        DateTime         @default(now())
+  readAt        DateTime?
+
+  @@index([threadId, sentAt])
+}
+
+model Task {
+  id                  String      @id @default(cuid())
+  applicationId       String?
+  application         Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  assigneeUserId      String
+  assignee            User        @relation("TaskAssignee", fields: [assigneeUserId], references: [id])
+  title               String
+  description         String?     @db.Text
+  dueAt               DateTime?
+  status              TaskStatus  @default(OPEN)
+  createdByAutomation Boolean     @default(false)
+  createdAt           DateTime    @default(now())
+  completedAt         DateTime?
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?  @db.Text
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+}
